@@ -378,7 +378,8 @@ export function usage(provider, window, percent, resetsAt, critical) {
         key: `usage:${provider}:${window}`,
         icon: name.includes('claude') ? 'isle-claude'
             : name.includes('grok') ? 'isle-grok'
-            : name.includes('gpt') || name.includes('codex') ? 'isle-openai' : 'isle-gauge',
+            : name.includes('gpt') || name.includes('codex') ? 'isle-openai'
+            : name.includes('antigravity') || name.includes('agy') ? 'isle-sparkle-symbolic' : 'isle-gauge',
         ring: Math.min(1, percent / 100),
         title: provider,
         subtitle: resetsAt > 0 ? `${limitName(window)} · resets ${when}` : limitName(window),
@@ -387,7 +388,8 @@ export function usage(provider, window, percent, resetsAt, critical) {
         tone: Math.round(percent) >= critical ? 'bad'
             : name.includes('claude') ? 'claude'
             : name.includes('grok') ? 'grok'
-            : name.includes('gpt') || name.includes('codex') ? 'codex' : 'neutral',
+            : name.includes('gpt') || name.includes('codex') ? 'codex'
+            : name.includes('antigravity') || name.includes('agy') ? 'agy' : 'neutral',
         duration: REMINDER_DURATION,
         page: 'usage',
     };
