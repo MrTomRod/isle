@@ -66,6 +66,17 @@ fn link_login(user: &Path, isle: &Path) {
 /// What `agy models` lists for this account (`id<TAB>name` lines): run in Isle's home for agy, as every
 /// agy here, and asking nothing of the AI.
 pub async fn models(program: &Path) -> anyhow::Result<String> {
+    let stdout = run_isolated(program, &["models"]).await?;
+    Ok(stdout)
+}
+
+/// What `agy -p "/usage" --output-format json` reports for this account's plan limits.
+pub async fn usage(program: &Path) -> anyhow::Result<String> {
+    run_isolated(program, &["-p", "/usage", "--output-format", "json"]).await
+}
+
+/// Runs `agy` with `args` in Isle's isolated agy home, sharing the user's OAuth sign-in.
+async fn run_isolated(program: &Path, args: &[&str]) -> anyhow::Result<String> {
     use tokio::io::AsyncReadExt;
     let user = dirs::home_dir();
     if let Some(user) = &user {
@@ -74,7 +85,7 @@ pub async fn models(program: &Path) -> anyhow::Result<String> {
     std::fs::create_dir_all(home())?;
     let mut command = Command::new(program);
     command
-        .arg("models")
+        .args(args)
         .current_dir(home())
         .env("HOME", home())
         .env_remove("XDG_CONFIG_HOME")
@@ -98,7 +109,12 @@ pub async fn models(program: &Path) -> anyhow::Result<String> {
     if let Some(user) = &user {
         link_login(user, &home());
     }
-    anyhow::ensure!(status.success(), "agy models failed: {}", stderr.trim());
+    anyhow::ensure!(
+        status.success(),
+        "agy failed: {} {}",
+        stderr.trim(),
+        stdout.trim()
+    );
     Ok(stdout)
 }
 

@@ -112,7 +112,7 @@ export default class IslePreferences extends ExtensionPreferences {
             description: found.length
                 ? 'How much of your plans\' limits is used, on a Usage page in the open island, with a warning ' +
                   'as one nears its end. Found from the apps you are signed in to; nothing else to set up.'
-                : 'Sign in to Claude Code, Codex or Grok and your plan shows up here.',
+                : 'Sign in to Claude Code, Codex, Grok or Antigravity (agy) and your plan shows up here.',
         });
         const enabled = switchRow(settings, 'usage-enabled', 'Show AI usage', 'The Usage page and its warnings');
         group.add(enabled);
@@ -1465,7 +1465,7 @@ function nvmBins(home) {
     return versions.map(name => GLib.build_filenamev([root, name, 'bin']));
 }
 
-/** The AI providers signed in here, as rows to switch: Claude Code's sign-in, Codex's (or its logs), and Grok's. */
+/** The AI providers signed in here, as rows to switch: Claude Code's sign-in, Codex's (or its logs), Grok's, and Antigravity's. */
 // Where isled reads them (usage.rs): Claude Code's config dir, the user's Codex home and Isle's own.
 function usageProviders() {
     const providers = [];
@@ -1478,6 +1478,9 @@ function usageProviders() {
         providers.push({key: 'usage-codex', title: 'ChatGPT', subtitle: 'Signed in with Codex'});
     if (GLib.file_test(GLib.build_filenamev([grokHome(), 'auth.json']), GLib.FileTest.EXISTS))
         providers.push({key: 'usage-grok', title: 'Grok', subtitle: 'Signed in with Grok'});
+    if (GLib.file_test(GLib.build_filenamev([GLib.get_home_dir(), '.gemini/antigravity-cli/antigravity-oauth-token']), GLib.FileTest.EXISTS) &&
+        findProgram('agy'))
+        providers.push({key: 'usage-agy', title: 'Antigravity', subtitle: 'Signed in with Antigravity (agy)'});
     return providers;
 }
 

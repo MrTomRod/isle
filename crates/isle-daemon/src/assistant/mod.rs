@@ -43,8 +43,9 @@ use zbus::object_server::{InterfaceRef, SignalEmitter};
 use zbus::{Connection, fdo, interface};
 
 pub use self::agenda::Sources;
+pub use self::agy::usage as agy_usage;
 use self::brain::{Brain, Failure};
-pub use self::brain::{Provider, install_dirs};
+pub use self::brain::{Provider, explain as explain_failure, install_dirs};
 use self::chat::{Chat, Item, Keep};
 pub use self::claude::config_dir as claude_config_dir;
 pub use self::codex::user_home as codex_home;

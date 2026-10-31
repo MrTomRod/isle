@@ -18,8 +18,10 @@ import {Page} from './page.js';
 
 /** A limit warns (an alert) and then turns red at these shares; Settings may move them (see `setMarks`). */
 const MARKS = {warn: 80, critical: 95};
+/** Extra height (in CSS px) per limit beyond the first three that fit the standard page height. */
+const EXTRA_LIMIT_HEIGHT = 36;
 /** Each provider's colour, for its bars. */
-const ACCENTS = {claude: [0.85, 0.47, 0.34], codex: [0.06, 0.64, 0.5], grok: [0.93, 0.94, 0.96]};
+const ACCENTS = {claude: [0.85, 0.47, 0.34], codex: [0.06, 0.64, 0.5], grok: [0.93, 0.94, 0.96], agy: [0.3, 0.55, 1]};
 const FALLBACK = Palette.BLUE;
 /** How far a scroll goes before it moves to the next provider. */
 const WHEEL_STEP = 1;
@@ -33,7 +35,7 @@ const FILL_MS = 500;
 const css = ([r, g, b], alpha = 1) => `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${alpha})`;
 
 /** Each provider's logo (icons/), shown by its name. */
-const LOGOS = {claude: 'isle-claude', codex: 'isle-openai', grok: 'isle-grok'};
+const LOGOS = {claude: 'isle-claude', codex: 'isle-openai', grok: 'isle-grok', agy: 'isle-sparkle-symbolic'};
 
 /** The provider's logo, or a dot of its colour for one without. */
 function mark(id) {
@@ -120,12 +122,27 @@ class UsagePage extends Page {
 
     /** As isled last read them. */
     _providers() {
-        return this.daemon.state.usage?.providers ?? [];
+        return this.daemon?.state?.usage?.providers ?? [];
     }
 
-    /** Only with a provider found (Claude Code or Codex signed in) and usage turned on. */
+    /** Only with a provider found (Claude Code, Codex, Grok or Antigravity signed in) and usage turned on. */
     get available() {
         return this._providers().length > 0;
+    }
+
+    /** Its height in CSS pixels: past the standard (Settings → Size) when the shown provider has more than 3 limits. */
+    get pageHeight() {
+        const standard = super.pageHeight;
+        // Asked from `Page._init` too, before the daemon is here.
+        if (!this.daemon || standard === undefined)
+            return standard;
+        const provider = this._providers()[this._index()];
+        const extra = Math.max(0, (provider?.windows?.length ?? 0) - 3);
+        return standard + extra * EXTRA_LIMIT_HEIGHT;
+    }
+
+    set pageHeight(height) {
+        super.pageHeight = height;
     }
 
     /** The shares at which a bar warns, from Settings. */
@@ -174,6 +191,11 @@ class UsagePage extends Page {
             if (providers[index])
                 this._card.add_child(this._content(providers[index]));
             this._updateDots(providers.length, index);
+            const height = px(this.pageHeight);
+            if (this.height !== height) {
+                this.height = height;
+                this.emit('width-changed');
+            }
         } else if (providers[index]) {
             this._retime(providers[index]);
         }
@@ -305,7 +327,7 @@ class UsagePage extends Page {
         content.add_child(head);
 
         const limits = new St.BoxLayout({...VERTICAL, style_class: 'isle-usage-limits'});
-        for (const window of provider.windows.slice(0, 3))
+        for (const window of provider.windows)
             limits.add_child(this._limit(window, accent));
         if (provider.windows.length === 0)
             limits.add_child(label(provider.empty || 'No limits reported yet', 'isle-usage-empty'));
