@@ -40,6 +40,7 @@ const CODEX_TAIL: u64 = 256 * 1024;
 /// Asked to refresh (the page opened), Claude is asked again only after this long.
 const CLAUDE_AT_MOST: Duration = Duration::from_secs(2 * 60);
 const CLAUDE_TIMEOUT: Duration = Duration::from_secs(10);
+const AGY_TIMEOUT: Duration = Duration::from_secs(20);
 /// Only Codex's newest session logs are looked at.
 const CODEX_FILES: usize = 8;
 /// Where Codex's /status reads the plan and its limits.
@@ -87,6 +88,8 @@ struct Config {
     /// Missing from an older extension: on, like the setting's own default.
     #[serde(default = "on")]
     grok: bool,
+    #[serde(default = "on")]
+    agy: bool,
     /// The AI assistant turned on: off, a plan seen here starts no AI to list its models.
     #[serde(default = "on")]
     assistant: bool,
@@ -108,6 +111,7 @@ impl Default for Config {
             claude: true,
             codex: true,
             grok: true,
+            agy: true,
             assistant: true,
             warn: 80.0,
             critical: 95.0,
@@ -139,7 +143,7 @@ impl UsageService {
 
 #[interface(name = "io.github.zickrian.isle.Usage1")]
 impl UsageService {
-    /// JSON `{enabled, claude, codex, grok, assistant, warn, critical}`, from Settings.
+    /// JSON `{enabled, claude, codex, grok, agy, assistant, warn, critical}`, from Settings.
     fn set_config(&mut self, config: &str) -> fdo::Result<()> {
         self.config =
             serde_json::from_str(config).map_err(|err| fdo::Error::InvalidArgs(err.to_string()))?;
@@ -188,6 +192,11 @@ pub async fn run(iface: InterfaceRef<UsageService>, refresh: Arc<Notify>) {
     let mut grok_wait = CLAUDE_EVERY;
     let mut grok_failures = 0;
     let mut grok_last_error = None;
+    let mut agy: Option<Provider> = None;
+    let mut asked_agy: Option<Instant> = None;
+    let mut agy_wait = CLAUDE_EVERY;
+    let mut agy_failures = 0;
+    let mut agy_last_error = None;
     let mut codex = CodexReader::default();
     // Unlocking wakes the loop, to ask Claude if it came due meanwhile.
     let mut locked = crate::system::locked();
@@ -307,6 +316,41 @@ pub async fn run(iface: InterfaceRef<UsageService>, refresh: Arc<Notify>) {
                 providers.extend(read);
             }
         }
+        if config.agy && agy_signed_in() {
+            let due = |every| asked_agy.is_none_or(|at: Instant| at.elapsed() >= every);
+            if (forced && agy_page_wait(agy_last_error).is_some_and(due))
+                || (!paused && due(agy_wait))
+            {
+                asked_agy = Some(Instant::now());
+                let fresh = Some(read_agy().await);
+                agy_failures = if matches!(fresh, Some(Ok(_))) {
+                    0
+                } else {
+                    agy_failures + 1
+                };
+                agy_last_error = match &fresh {
+                    Some(Err(why)) => Some(*why),
+                    _ => None,
+                };
+                agy_wait =
+                    agy_wait_after(fresh.as_ref().map(|r| r.as_ref().map(|_| ())), agy_failures);
+                agy = match (fresh, agy.take()) {
+                    (Some(Ok(fresh)), _) => Some(fresh),
+                    (Some(Err(why)), Some(mut last)) => Some(Provider {
+                        note: why.note().into(),
+                        ..std::mem::take(&mut last)
+                    }),
+                    (Some(Err(why)), None) => Some(Provider {
+                        note: why.note().into(),
+                        ..agy_shell()
+                    }),
+                    (None, last) => last,
+                };
+            }
+            providers.extend(agy.clone());
+        } else {
+            agy = None;
+        }
         for provider in &mut providers {
             settle(provider, now_ms());
         }
@@ -333,10 +377,14 @@ pub async fn run(iface: InterfaceRef<UsageService>, refresh: Arc<Notify>) {
             .as_ref()
             .filter(|_| !paused)
             .map(|_| due_in(asked_grok, grok_wait));
-        let remote_due = match (claude_due_in, grok_due_in) {
-            (Some(claude_in), Some(grok_in)) => Some(claude_in.min(grok_in)),
-            (due, None) | (None, due) => due,
-        };
+        let agy_due_in = agy
+            .as_ref()
+            .filter(|_| !paused)
+            .map(|_| due_in(asked_agy, agy_wait));
+        let remote_due = [claude_due_in, grok_due_in, agy_due_in]
+            .into_iter()
+            .flatten()
+            .min();
         next = Some(next_wait(
             config.codex && !paused && codex_signed_in(),
             remote_due,
@@ -760,6 +808,171 @@ fn grok_period(kind: &str) -> String {
     } else {
         "Limit".into()
     }
+}
+
+/// Why Antigravity's limits could not be read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgyError {
+    /// No sign-in, or the server turned it down.
+    SignIn,
+    /// No network (yet).
+    Offline,
+    /// The CLI or server failed or answered in a way not understood.
+    Busy,
+}
+
+impl AgyError {
+    /// What the page says, under the last numbers.
+    fn note(self) -> &'static str {
+        match self {
+            AgyError::SignIn => "Sign in again with Antigravity",
+            AgyError::Offline => "Offline; showing the last numbers",
+            AgyError::Busy => "Could not reach Antigravity; showing the last numbers",
+        }
+    }
+
+    /// Antigravity's failures map onto Claude's, so both back off alike.
+    fn as_claude(self) -> ClaudeError {
+        match self {
+            AgyError::SignIn => ClaudeError::SignIn,
+            AgyError::Offline => ClaudeError::Offline,
+            AgyError::Busy => ClaudeError::Busy,
+        }
+    }
+}
+
+/// Whether Antigravity is installed and signed in.
+fn agy_signed_in() -> bool {
+    crate::assistant::Provider::Agy.signed_in()
+        && crate::assistant::Provider::Agy.program().is_some()
+}
+
+/// Antigravity before its limits are read.
+fn agy_shell() -> Provider {
+    Provider {
+        id: "agy".into(),
+        name: "Antigravity".into(),
+        ..Provider::default()
+    }
+}
+
+/// How long until Antigravity is asked again; the same pauses as Claude's.
+fn agy_wait_after(outcome: Option<Result<(), &AgyError>>, failures: usize) -> Duration {
+    let mapped = outcome.map(|result| result.map_err(|err| err.as_claude()));
+    wait_after(
+        mapped.as_ref().map(|result| result.as_ref().map(|_| ())),
+        failures,
+    )
+}
+
+/// Antigravity's take on `page_wait`.
+fn agy_page_wait(last: Option<AgyError>) -> Option<Duration> {
+    page_wait(last.map(AgyError::as_claude))
+}
+
+/// Antigravity's limits now, from `agy -p "/usage" --output-format json`.
+async fn read_agy() -> Result<Provider, AgyError> {
+    let program = crate::assistant::Provider::Agy
+        .program()
+        .ok_or(AgyError::SignIn)?;
+    let stdout = tokio::time::timeout(AGY_TIMEOUT, crate::assistant::agy_usage(&program))
+        .await
+        .map_err(|_| {
+            warn!("could not read Antigravity's usage: timed out");
+            AgyError::Offline
+        })?
+        .map_err(|err| {
+            let text = format!("{err:#}");
+            warn!("could not read Antigravity's usage: {text}");
+            let explained =
+                crate::assistant::explain_failure(crate::assistant::Provider::Agy, &text);
+            if explained.sign_in {
+                AgyError::SignIn
+            } else if explained.error == "You’re offline" {
+                AgyError::Offline
+            } else {
+                AgyError::Busy
+            }
+        })?;
+    let response: Value = serde_json::from_str(&stdout).map_err(|err| {
+        warn!("could not parse Antigravity's usage: {err}");
+        AgyError::Busy
+    })?;
+    if response["status"] != "SUCCESS" {
+        let error = response["error"].as_str().unwrap_or("agy /usage failed");
+        warn!("Antigravity /usage failed: {error}");
+        let explained = crate::assistant::explain_failure(crate::assistant::Provider::Agy, error);
+        return Err(if explained.sign_in {
+            AgyError::SignIn
+        } else if explained.error == "You’re offline" {
+            AgyError::Offline
+        } else {
+            AgyError::Busy
+        });
+    }
+    Ok(agy_live(&response, now_ms()))
+}
+
+/// The answer of `agy -p "/usage" --output-format json` as a provider read at `now`.
+fn agy_live(response: &Value, now: i64) -> Provider {
+    Provider {
+        windows: agy_windows(&response["command"]["data"]),
+        updated_ms: now,
+        ..agy_shell()
+    }
+}
+
+/// The limits Antigravity reports across its model groups: "5 hours · Gemini", "Week · Gemini"…
+fn agy_windows(data: &Value) -> Vec<Window> {
+    let Some(groups) = data["groups"].as_array() else {
+        return Vec::new();
+    };
+    let mut windows = Vec::new();
+    for group in groups {
+        let scope = agy_group_label(group["name"].as_str().unwrap_or_default());
+        let Some(buckets) = group["buckets"].as_array() else {
+            continue;
+        };
+        let mut group_windows: Vec<(u8, Window)> = buckets
+            .iter()
+            .filter_map(|bucket| {
+                let remaining = bucket["remaining_fraction"].as_f64()?;
+                let span = match bucket["window"].as_str().unwrap_or_default() {
+                    "5h" => "5 hours".to_owned(),
+                    "weekly" => "Week".to_owned(),
+                    other if !other.is_empty() => title_case(other),
+                    _ => bucket["name"].as_str().unwrap_or("Limit").to_owned(),
+                };
+                let order = if span == "5 hours" { 0 } else { 1 };
+                let label = if scope.is_empty() {
+                    span
+                } else {
+                    format!("{span} · {scope}")
+                };
+                Some((
+                    order,
+                    Window {
+                        label,
+                        percent: (1.0 - remaining).clamp(0.0, 1.0) * 100.0,
+                        resets_at_ms: bucket["reset_time"].as_str().map_or(0, rfc3339_ms),
+                    },
+                ))
+            })
+            .collect();
+        group_windows.sort_by_key(|(order, _)| *order);
+        windows.extend(group_windows.into_iter().map(|(_, window)| window));
+    }
+    windows
+}
+
+/// Shortens an Antigravity group name ("Gemini Models" -> "Gemini", "Claude and GPT models" -> "Claude & GPT").
+fn agy_group_label(name: &str) -> String {
+    let trimmed = name
+        .trim()
+        .strip_suffix(" Models")
+        .or_else(|| name.trim().strip_suffix(" models"))
+        .unwrap_or(name.trim());
+    trimmed.replace(" and ", " & ")
 }
 
 /// ChatGPT's plan and limits: asked as Codex's /status does, as often as Claude's, and in between as Codex
@@ -1305,6 +1518,91 @@ mod tests {
         };
         settle(&mut provider, 2_000);
         assert_eq!(provider.windows[0].percent, 0.0);
+    }
+
+    #[test]
+    fn reads_antigravitys_groups_and_buckets() {
+        let response = json!({
+            "status": "SUCCESS",
+            "command": {
+                "name": "usage",
+                "data": {
+                    "groups": [
+                        {
+                            "name": "Gemini Models",
+                            "buckets": [
+                                {
+                                    "id": "gemini-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.96,
+                                    "reset_time": "2026-11-02T08:49:47Z"
+                                },
+                                {
+                                    "id": "gemini-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 0.9,
+                                    "reset_time": "2026-10-31T15:38:26Z"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Claude and GPT models",
+                            "buckets": [
+                                {
+                                    "id": "3p-weekly",
+                                    "name": "Weekly Limit Remaining",
+                                    "window": "weekly",
+                                    "remaining_fraction": 1.0,
+                                    "reset_time": "2026-11-07T11:49:51Z"
+                                },
+                                {
+                                    "id": "3p-5h",
+                                    "name": "Five Hour Limit Remaining",
+                                    "window": "5h",
+                                    "remaining_fraction": 1.0,
+                                    "reset_time": "2026-10-31T16:49:51Z"
+                                }
+                            ]
+                        },
+                        {
+                            "name": "Gemini 4 Argon",
+                            "buckets": [
+                                {
+                                    "id": "gemini-argon-wtu-weekly",
+                                    "name": "Gemini 4 Argon Weekly Limit",
+                                    "window": "weekly",
+                                    "remaining_fraction": 0.75,
+                                    "reset_time": "2026-11-02T08:27:56Z"
+                                }
+                            ]
+                        }
+                    ]
+                }
+            }
+        });
+        let agy = agy_live(&response, 1_000);
+        assert_eq!((agy.id.as_str(), agy.name.as_str()), ("agy", "Antigravity"));
+        assert_eq!(agy.updated_ms, 1_000);
+        let labels: Vec<&str> = agy.windows.iter().map(|w| w.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "5 hours · Gemini",
+                "Week · Gemini",
+                "5 hours · Claude & GPT",
+                "Week · Claude & GPT",
+                "Week · Gemini 4 Argon",
+            ]
+        );
+        assert!((agy.windows[0].percent - 10.0).abs() < 1e-6);
+        assert!((agy.windows[1].percent - 4.0).abs() < 1e-6);
+        assert!((agy.windows[4].percent - 25.0).abs() < 1e-6);
+        assert_eq!(
+            agy.windows[0].resets_at_ms,
+            rfc3339_ms("2026-10-31T15:38:26Z")
+        );
     }
 
     #[test]
