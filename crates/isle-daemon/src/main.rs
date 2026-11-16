@@ -290,7 +290,7 @@ async fn doctor() {
         }
     );
     assistant::prepare_report().await;
-    println!("Voice assistant:\n{}", assistant::report());
+    println!("Voice assistant:\n{}", assistant::report().await);
     println!("AI alerts:\n{}", agents::report());
 }
 

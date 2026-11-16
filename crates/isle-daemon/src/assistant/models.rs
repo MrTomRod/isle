@@ -410,7 +410,7 @@ impl Shared {
 /// `provider`'s plan and models now.
 async fn read(provider: Provider) -> Found {
     // opencode answers with OpenCode's free models signed in or not.
-    let usable = provider == Provider::Opencode || provider.signed_in();
+    let usable = provider == Provider::Opencode || provider.signed_in().await;
     let Some(program) = provider.program().filter(|_| usable) else {
         return Found::Gone;
     };
