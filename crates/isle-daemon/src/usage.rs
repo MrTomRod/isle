@@ -316,7 +316,7 @@ pub async fn run(iface: InterfaceRef<UsageService>, refresh: Arc<Notify>) {
                 providers.extend(read);
             }
         }
-        if config.agy && agy_signed_in() {
+        if config.agy && agy_signed_in().await {
             let due = |every| asked_agy.is_none_or(|at: Instant| at.elapsed() >= every);
             if (forced && agy_page_wait(agy_last_error).is_some_and(due))
                 || (!paused && due(agy_wait))
@@ -336,6 +336,8 @@ pub async fn run(iface: InterfaceRef<UsageService>, refresh: Arc<Notify>) {
                     agy_wait_after(fresh.as_ref().map(|r| r.as_ref().map(|_| ())), agy_failures);
                 agy = match (fresh, agy.take()) {
                     (Some(Ok(fresh)), _) => Some(fresh),
+                    // Not signed in: hidden, as everywhere else — Isle does not tell the user to sign in to agy.
+                    (Some(Err(AgyError::SignIn)), _) => None,
                     (Some(Err(why)), Some(mut last)) => Some(Provider {
                         note: why.note().into(),
                         ..std::mem::take(&mut last)
@@ -842,8 +844,8 @@ impl AgyError {
 }
 
 /// Whether Antigravity is installed and signed in.
-fn agy_signed_in() -> bool {
-    crate::assistant::Provider::Agy.signed_in()
+async fn agy_signed_in() -> bool {
+    crate::assistant::Provider::Agy.signed_in().await
         && crate::assistant::Provider::Agy.program().is_some()
 }
 

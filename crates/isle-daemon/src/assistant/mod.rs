@@ -19,6 +19,7 @@ mod codex;
 mod eval;
 mod files;
 mod grok;
+mod keyring;
 mod mic;
 mod models;
 mod music;
@@ -1666,12 +1667,8 @@ async fn start_brain(
     iface: &InterfaceRef<AssistantService>,
     session: &mut Session,
 ) -> Result<(), Failure> {
-    let wanted = or(&session.context.provider, "auto").to_owned();
-    // Reading sign-ins can start a program (opencode 2's `auth export`): not on the daemon's own threads.
-    let picked = tokio::task::spawn_blocking(move || Provider::pick(&wanted))
-        .await
-        .ok()
-        .flatten();
+    let wanted = or(&session.context.provider, "auto");
+    let picked = Provider::pick(wanted).await;
     let provider = picked.ok_or_else(|| {
         Failure::from((
             "No AI is set up",
@@ -2049,26 +2046,35 @@ pub async fn prepare_report() {
 }
 
 /// What `isled --doctor` says about the assistant: speech recognition, and each AI and its sign-in.
-pub fn report() -> String {
+pub async fn report() -> String {
     let mut lines = vec![whisper::report()];
     for provider in Provider::all() {
         let name = provider.name();
-        lines.push(match provider.program() {
-            None => format!("  {name}: not installed"),
-            Some(path) if provider.signed_in() => {
-                format!("  {name}: {} (signed in)", path.display())
-            }
+        let Some(path) = provider.program() else {
+            lines.push(format!("  {name}: not installed"));
+            continue;
+        };
+        if provider.signed_in().await {
+            lines.push(format!("  {name}: {} (signed in)", path.display()));
+            continue;
+        }
+        // Isle does not tell the user agy is signed out.
+        if provider == Provider::Agy {
+            continue;
+        }
+        lines.push(if provider == Provider::Opencode {
             // OpenCode's free models need no sign-in.
-            Some(path) if provider == Provider::Opencode => format!(
+            format!(
                 "  {name}: {} (free models; `{}` for your own providers)",
                 path.display(),
                 provider.sign_in_command()
-            ),
-            Some(path) => format!(
+            )
+        } else {
+            format!(
                 "  {name}: {} (not signed in: run `{}`)",
                 path.display(),
                 provider.sign_in_command()
-            ),
+            )
         });
     }
     lines.join("\n")

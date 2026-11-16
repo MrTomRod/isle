@@ -92,18 +92,21 @@ impl Provider {
             .find(|path| path.is_file())
     }
 
-    /// Whether the user signed in to it, as far as its sign-in file tells.
-    pub fn signed_in(self) -> bool {
+    /// Whether the user signed in to it, as far as its sign-in file or keyring tells.
+    pub async fn signed_in(self) -> bool {
         let home = dirs::home_dir().unwrap_or_default();
         match self {
-            Provider::Agy => agy::signed_in_at(&home),
+            Provider::Agy => agy::signed_in_at(&home) || agy::keyring_signed_in().await,
             Provider::Claude => super::claude::signed_in(),
             Provider::Codex => {
                 super::codex::user_auth().exists()
                     || std::env::var_os("OPENAI_API_KEY").is_some_and(|key| !key.is_empty())
             }
             Provider::Grok => super::grok::signed_in(),
-            Provider::Opencode => super::opencode::signed_in(),
+            // May run `opencode auth export`, so keep it off the daemon's own threads.
+            Provider::Opencode => tokio::task::spawn_blocking(super::opencode::signed_in)
+                .await
+                .unwrap_or(false),
             Provider::Pi => super::pi::signed_in(),
         }
     }
@@ -137,17 +140,29 @@ impl Provider {
         AUTO
     }
 
-    /// `wanted` ("agy", "claude", "codex", "grok", "opencode", "pi" or "auto"), if installed; for "auto", the first installed and
-    /// signed in, else the first installed (which then asks to sign in).
-    pub fn pick(wanted: &str) -> Option<Provider> {
-        let installed = |p: &Provider| p.program().is_some();
-        match AUTO.into_iter().find(|p| p.id() == wanted) {
-            Some(provider) => installed(&provider).then_some(provider),
-            None => AUTO
-                .into_iter()
-                .find(|p| installed(p) && p.signed_in())
-                .or_else(|| AUTO.into_iter().find(installed)),
+    /// `wanted` ("agy", "claude", "codex", "grok", "opencode", "pi" or "auto"), if installed (and for agy,
+    /// signed in); for "auto", the first installed and signed in, else the first installed (skipping agy
+    /// that is not signed in).
+    pub async fn pick(wanted: &str) -> Option<Provider> {
+        let installed = |p: Provider| p.program().is_some();
+        if let Some(provider) = AUTO.into_iter().find(|p| p.id() == wanted) {
+            return (installed(provider)
+                && (provider != Provider::Agy || provider.signed_in().await))
+                .then_some(provider);
         }
+        let mut fallback = None;
+        for provider in AUTO {
+            if !installed(provider) {
+                continue;
+            }
+            if provider.signed_in().await {
+                return Some(provider);
+            }
+            if provider != Provider::Agy && fallback.is_none() {
+                fallback = Some(provider);
+            }
+        }
+        fallback
     }
 }
 
@@ -694,11 +709,22 @@ mod tests {
         std::fs::remove_dir_all(&home).ok();
     }
 
-    #[test]
-    fn picks_only_installed_providers() {
-        assert!(Provider::pick("no-such-provider").is_none_or(|p| p.program().is_some()));
+    #[tokio::test]
+    async fn picks_only_installed_providers() {
+        let picked = Provider::pick("no-such-provider").await;
+        assert!(picked.is_none_or(|p| p.program().is_some()));
+        if picked == Some(Provider::Agy) {
+            assert!(Provider::Agy.signed_in().await);
+        }
         for provider in AUTO {
-            assert!(Provider::pick(provider.id()).is_none_or(|p| p == provider));
+            let picked = Provider::pick(provider.id()).await;
+            if provider.program().is_some()
+                && (provider != Provider::Agy || provider.signed_in().await)
+            {
+                assert_eq!(picked, Some(provider));
+            } else {
+                assert_eq!(picked, None);
+            }
         }
     }
 }

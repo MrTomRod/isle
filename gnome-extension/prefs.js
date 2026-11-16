@@ -113,7 +113,7 @@ export default class IslePreferences extends ExtensionPreferences {
             description: found.length
                 ? 'How much of your plans\' limits is used, on a Usage page in the open island, with a warning ' +
                   'as one nears its end. Found from the apps you are signed in to; nothing else to set up.'
-                : 'Sign in to Claude Code, Codex, Grok or Antigravity (agy) and your plan shows up here.',
+                : 'Sign in to Claude Code, Codex or Grok and your plan shows up here.',
         });
         const enabled = switchRow(settings, 'usage-enabled', 'Show AI usage', 'The Usage page and its warnings');
         group.add(enabled);
@@ -161,7 +161,11 @@ export default class IslePreferences extends ExtensionPreferences {
     // The assistant: which AI and model, speech, the conversation, and its look.
     _voicePage(settings, window) {
         const page = new Adw.PreferencesPage({title: 'Assistant', icon_name: 'audio-input-microphone-symbolic'});
-        const installed = AI_PROVIDERS.filter(provider => findProgram(provider.command));
+        const installed = AI_PROVIDERS.filter(provider => findProgram(provider.command) && (provider.id !== 'agy' || signedIn('agy')));
+        // A pick Isle no longer offers (its AI was uninstalled, or agy signed out) goes back to Automatic.
+        const picked = settings.get_string('voice-provider');
+        if (picked !== 'auto' && !installed.some(provider => provider.id === picked))
+            settings.set_string('voice-provider', 'auto');
         const group = new Adw.PreferencesGroup({
             title: 'Voice Assistant',
             description: 'Press the shortcut (or the ✦ in the open island) and speak. Speech is recognised on this ' +
@@ -1473,6 +1477,24 @@ function grokHome() {
     return GLib.getenv('GROK_HOME') || GLib.build_filenamev([GLib.get_home_dir(), '.grok']);
 }
 
+/** Whether the login keyring holds agy's sign-in (Secret Service), where agy 1.5 and later keep it. */
+let agyKeyring;
+function agyInKeyring() {
+    if (agyKeyring !== undefined)
+        return agyKeyring;
+    try {
+        const reply = Gio.DBus.session.call_sync('org.freedesktop.secrets', '/org/freedesktop/secrets',
+            'org.freedesktop.Secret.Service', 'SearchItems',
+            new GLib.Variant('(a{ss})', [{service: 'gemini', username: 'antigravity'}]),
+            null, Gio.DBusCallFlags.NONE, 1000, null);
+        const [unlocked, locked] = reply.deepUnpack();
+        agyKeyring = unlocked.length > 0 || locked.length > 0;
+    } catch {
+        agyKeyring = false;
+    }
+    return agyKeyring;
+}
+
 /** Whether AI `id` has a sign-in, checked as isled does (brain.rs `signed_in`). */
 function signedIn(id) {
     const exists = (...parts) => GLib.file_test(GLib.build_filenamev(parts), GLib.FileTest.EXISTS);
@@ -1531,9 +1553,10 @@ function signedIn(id) {
         }
     }
     case 'agy':
-        // Before agy 1.4, and since.
+        // Before agy 1.4, 1.4's own file, and the login keyring since 1.5.
         return exists(GLib.get_home_dir(), '.gemini/antigravity-cli/antigravity-oauth-token') ||
-            exists(GLib.get_home_dir(), '.gemini/jetski-standalone-oauth-token');
+            exists(GLib.get_home_dir(), '.gemini/jetski-standalone-oauth-token') ||
+            agyInKeyring();
     default:
         return false;
     }
@@ -1589,14 +1612,13 @@ function usageProviders() {
     // The plan's name is isled's (Settings → Assistant, the Usage page), as the apps name it.
     if (GLib.file_test(GLib.build_filenamev([claudeConfigDir(), '.credentials.json']), GLib.FileTest.EXISTS))
         providers.push({key: 'usage-claude', title: 'Claude', subtitle: 'Signed in with Claude Code'});
-    const signedIn = GLib.file_test(GLib.build_filenamev([codexHome(), 'auth.json']), GLib.FileTest.EXISTS);
+    const codexSignedIn = GLib.file_test(GLib.build_filenamev([codexHome(), 'auth.json']), GLib.FileTest.EXISTS);
     const sessions = [[codexHome(), 'sessions'], [GLib.get_user_data_dir(), 'isle', 'codex', 'sessions']];
-    if (signedIn || sessions.some(dir => GLib.file_test(GLib.build_filenamev(dir), GLib.FileTest.IS_DIR)))
+    if (codexSignedIn || sessions.some(dir => GLib.file_test(GLib.build_filenamev(dir), GLib.FileTest.IS_DIR)))
         providers.push({key: 'usage-codex', title: 'ChatGPT', subtitle: 'Signed in with Codex'});
     if (GLib.file_test(GLib.build_filenamev([grokHome(), 'auth.json']), GLib.FileTest.EXISTS))
         providers.push({key: 'usage-grok', title: 'Grok', subtitle: 'Signed in with Grok'});
-    if (GLib.file_test(GLib.build_filenamev([GLib.get_home_dir(), '.gemini/antigravity-cli/antigravity-oauth-token']), GLib.FileTest.EXISTS) &&
-        findProgram('agy'))
+    if (findProgram('agy') && signedIn('agy'))
         providers.push({key: 'usage-agy', title: 'Antigravity', subtitle: 'Signed in with Antigravity (agy)'});
     return providers;
 }

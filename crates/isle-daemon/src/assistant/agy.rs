@@ -48,7 +48,16 @@ const PER_CONVERSATION: &[&str] = &[
 pub const LOGIN: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
 const STANDALONE_LOGIN: &str = ".gemini/jetski-standalone-oauth-token";
 
-/// Whether the user signed in to agy in `home`, as either version keeps it.
+/// Its sign-in in the login keyring, where agy 1.5 and later keep it (see keyring.rs).
+const KEYRING_SIGN_IN: [(&str, &str); 2] = [("service", "gemini"), ("username", "antigravity")];
+
+/// Whether the login keyring holds agy's sign-in; the token itself is never read.
+pub async fn keyring_signed_in() -> bool {
+    super::keyring::has_item(&KEYRING_SIGN_IN).await
+}
+
+/// Whether the user signed in to agy in `home`, as older token-file versions keep it.
+/// `Provider::Agy.signed_in` also asks the login keyring (`keyring_signed_in`).
 pub fn signed_in_at(home: &Path) -> bool {
     [LOGIN, STANDALONE_LOGIN]
         .iter()
